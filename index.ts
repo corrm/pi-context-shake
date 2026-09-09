@@ -620,9 +620,6 @@ export default function (pi: ExtensionAPI) {
     }
 
     modes = merged;
-    if (ctx.hasUI) {
-      ctx.ui.setWidget("pi-shake", [doneText]);
-    }
     ctx.ui.notify(doneText, "info");
   };
   const showStatus = (ctx: ExtensionCommandContext): void => {
