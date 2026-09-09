@@ -1,0 +1,35 @@
+{
+  "name": "pi-context-shake",
+  "version": "1.0.0",
+  "description": "pi extension: /shake tools|images|thinking — rebuilds session history in place to free context space",
+  "type": "module",
+  "license": "MIT",
+  "author": "Islam Nofl",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "context",
+    "compaction",
+    "history"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/islamnofl/pi-context-shake"
+  },
+  "files": [
+    "index.ts"
+  ],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.0"
+  }
+}
