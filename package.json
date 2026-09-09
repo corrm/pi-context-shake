@@ -14,7 +14,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/islamnofl/pi-context-shake"
+    "url": "https://github.com/corrm/pi-context-shake"
   },
   "files": [
     "index.ts"

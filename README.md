@@ -60,7 +60,7 @@ notes it.
 pi install npm:pi-context-shake
 
 # or straight from git
-pi install git:github.com/islamnofl/pi-context-shake
+pi install git:github.com/corrm/pi-context-shake
 
 # try it for one run without installing
 pi -e npm:pi-context-shake
