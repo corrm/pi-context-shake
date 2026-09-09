@@ -11,19 +11,20 @@
  *   /shake all          rebuild with every mode at once
  *
  * How it works:
- *   The session's .jsonl file is rewritten in place (atomically) and pi
- *   reopens it (the same code path as /resume), so the agent's in-memory
- *   history, the transcript, and the persisted session all reflect the
- *   shaken history — like omp's /shake. The footer's context-usage figure
- *   is anchored to the last provider-reported call and refreshes after the
- *   next LLM call.
+ *   The session's .jsonl file is rewritten in place (atomically) and the
+ *   live session manager re-reads it, so the persisted session reflects the
+ *   shaken history — like omp's /shake.
  *
- *   The running process keeps its in-memory message list until a session
- *   replacement, so a `context` hook (active while the session is marked
- *   shaken) also rewrites the copy of the history sent to the provider on
- *   every LLM call. Messages at or after the latest user message are never
- *   shaken by the hook, so an in-flight turn keeps full context. The hook is
- *   idempotent: once the re-read session is active it changes nothing.
+ *   The running process keeps its state (no session switch). A `context`
+ *   hook (active while the session is marked shaken) rewrites the copy of
+ *   the history sent to the provider on every LLM call, so the live
+ *   process also only sends the shaken history until the session is
+ *   reloaded. Messages at or after the latest user message are never
+ *   shaken by the hook, so an in-flight turn keeps full context. The hook
+ *   is idempotent: against already-shaken history it changes nothing.
+ *
+ *   The footer's context-usage figure is anchored to the last
+ *   provider-reported call and refreshes after the next LLM call.
  *
  *   Elision is irreversible for the shaken session (the original bytes are
  *   gone from the file) — the pre-shake history survives in any fork made
@@ -606,53 +607,24 @@ export default function (pi: ExtensionAPI) {
     // so the freed space shows up there after the next LLM call.
     const doneText = `shook history: ${parts.join(" · ")} — footer usage refreshes on the next LLM call`;
 
-    // Full session refresh: pi tears down the current session and reopens the
-    // rewritten file (the same code path as /resume), so the agent's
-    // in-memory history, the footer's context usage, and the transcript all
-    // update to the shaken state.
-    let switched = false;
+    // Re-read the rebuilt file into the live session manager (public API;
+    // the ReadonlySessionManager type on ctx merely hides it). No session
+    // switch: the running process keeps its state, and the context hook
+    // keeps the provider payload shaken until the session is reloaded.
     try {
-      const result = await ctx.switchSession(file, {
-        withSession: async (newCtx) => {
-          if (newCtx.hasUI) {
-            newCtx.ui.setWidget("pi-shake", [doneText]);
-          }
-          newCtx.ui.notify(doneText, "info");
-        },
-      });
-      if (!result.cancelled) {
-        try {
-          // Throws if the old ctx was invalidated by the real switch.
-          ctx.isIdle();
-        } catch {
-          switched = true;
-        }
-      }
-    } catch (err) {
-      ctx.ui.notify(`shake: session refresh failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-      return;
-    }
-    if (switched) {
-      // session_start (reason "resume") restored the merged modes from the
-      // pi-shake entry; the context hook now sees already-shaken history.
-      return;
-    }
-
-    // Fallback for modes where switchSession is a no-op (e.g. print/SDK):
-    // re-read the rebuilt file into the live session manager.
-    try {
-      // Runtime SessionManager exposes setSessionFile (public API) even though
-      // the ReadonlySessionManager type on ctx hides it.
       const liveManager = ctx.sessionManager as unknown as { setSessionFile(path: string): void };
       liveManager.setSessionFile(file);
     } catch (err) {
       ctx.ui.notify(`shake: history rebuilt on disk, in-memory re-read failed: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
     }
+
     modes = merged;
+    if (ctx.hasUI) {
+      ctx.ui.setWidget("pi-shake", [doneText]);
+    }
     ctx.ui.notify(doneText, "info");
   };
-
   const showStatus = (ctx: ExtensionCommandContext): void => {
     const model = ctx.model as unknown as ModelLike;
     const stats = estimateRemovable(ctx, { tools: true, images: true, thinking: true });
