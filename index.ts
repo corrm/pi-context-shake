@@ -24,7 +24,12 @@
  *   is idempotent: against already-shaken history it changes nothing.
  *
  *   The footer's context-usage figure is anchored to the last
- *   provider-reported call and refreshes after the next LLM call.
+ *   provider-reported call and refreshes after the next LLM call. Because
+ *   that same stale anchor is what pi's auto-compaction threshold checks,
+ *   a `session_before_compact` handler cancels automatic (threshold)
+ *   compaction right after a shake when the shaken history fits, so
+ *   "continue" does not trigger a needless re-compaction. Manual /compact
+ *   and overflow recovery are never blocked.
  *
  *   Elision is irreversible for the shaken session (the original bytes are
  *   gone from the file) — the pre-shake history survives in any fork made
@@ -39,7 +44,7 @@
 
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
 // Local structural types — only the type imports above are erased at load.
@@ -127,6 +132,8 @@ const fmt = (n: number): string => n.toLocaleString("en-US");
 const isTextBlock = (b: Block): b is TextBlock => b.type === "text";
 const isImageBlock = (b: Block): b is ImageBlock => b.type === "image";
 const isThinkingBlock = (b: Block): b is ThinkingBlock => b.type === "thinking";
+const isToolCallBlock = (b: Block): b is { type: "toolCall"; name?: string; arguments?: unknown } =>
+  b.type === "toolCall";
 const textLen = (b: Block): number => (isTextBlock(b) ? b.text.length : 0);
 const freedChars = (s: ShakeStats): number => s.toolChars + s.bashChars + s.blockChars + s.imageBytes + s.thinkingChars;
 
@@ -489,6 +496,65 @@ export function canDropSignedThinking(model: ModelLike): boolean {
   return model.compat?.supportsMidConvoEffort === true;
 }
 
+/** Headroom for the system prompt + tool schemas, which the per-message
+ *  estimate does not count but the provider will bill. */
+const SYSTEM_PROMPT_MARGIN = 8192;
+
+/**
+ * Replicate pi's per-message token estimator (chars/4; each image counted
+ * as ~4800 chars) so we can estimate what the shaken payload will occupy.
+ */
+export function estimateMessageTokens(messages: ShakeMessage[]): number {
+  let total = 0;
+  for (const msg of messages) {
+    const c = msg.content;
+    let chars = 0;
+    if (typeof c === "string") {
+      chars = c.length;
+    } else if (Array.isArray(c)) {
+      for (const b of c) {
+        if (isTextBlock(b)) {
+          chars += b.text.length;
+        } else if (b.type === "image") {
+          chars += 4800;
+        } else if (isThinkingBlock(b)) {
+          chars += b.thinking.length;
+        } else if (isToolCallBlock(b)) {
+          chars += (b.name ?? "").length + JSON.stringify(b.arguments ?? {}).length;
+        }
+      }
+    }
+    if (msg.role === "bashExecution" && typeof msg.output === "string") {
+      const command = typeof msg.command === "string" ? msg.command.length : 0;
+      chars = command + msg.output.length;
+    }
+    total += Math.ceil(chars / 4);
+  }
+  return total;
+}
+
+/**
+ * Decide whether pi's automatic (threshold) compaction can be skipped:
+ * true when the shaken history is small enough to fit, i.e. when the
+ * context hook will send a payload below the compaction threshold even
+ * though the footer's last-provider-usage anchor still looks full.
+ */
+export function shouldSkipAutoCompaction(args: {
+  modes: ShakeModes;
+  messages: ShakeMessage[];
+  opts: ShakeOptions;
+  contextWindow: number;
+  reserveTokens: number;
+  model: ModelLike;
+}): boolean {
+  const { modes, messages, opts, contextWindow, reserveTokens, model } = args;
+  if (contextWindow <= 0) return false;
+  if (!modes.tools && !modes.images && !modes.thinking) return false;
+  const { messages: shaken } = shakeMessages(messages, modes, opts, canDropSignedThinking(model));
+  const estimate = estimateMessageTokens(shaken) + SYSTEM_PROMPT_MARGIN;
+  return estimate <= contextWindow - reserveTokens;
+}
+
 // ---------------------------------------------------------------------------
 // Extension factory
 // ---------------------------------------------------------------------------
@@ -522,6 +588,48 @@ export default function (pi: ExtensionAPI) {
     const { messages: shaken, stats } = shakeMessages(messages, modes, opts, canDropSignedThinking(model));
     if (freedChars(stats) === 0) return;
     return { messages: shaken as unknown as typeof event.messages };
+  });
+
+  // Map the session's context entries to the messages the LLM would see.
+  const buildContextMessages = (ctx: ExtensionContext): ShakeMessage[] => {
+    const out: ShakeMessage[] = [];
+    for (const entry of ctx.sessionManager.buildContextEntries()) {
+      if (entry.type === "message") {
+        const message = entry.message;
+        if (message && typeof message === "object") out.push(message as unknown as ShakeMessage);
+      } else if (entry.type === "custom_message") {
+        out.push({ role: "custom", content: entry.content as ShakeMessage["content"] });
+      } else if (entry.type === "branch_summary" && typeof entry.summary === "string") {
+        out.push({ role: "branchSummary", content: entry.summary });
+      } else if (entry.type === "compaction" && typeof entry.summary === "string") {
+        out.push({ role: "compactionSummary", content: entry.summary });
+      }
+    }
+    return out;
+  };
+
+  // Guard against premature auto-compaction right after a shake: pi's
+  // threshold check is anchored to the last provider-reported usage (from
+  // before the shake), but the context hook will actually send the shaken
+  // payload, so skip the automatic compaction when the shaken history fits.
+  // Manual /compact and overflow recovery always proceed.
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (event.reason !== "threshold") return;
+    const settings = event.preparation.settings;
+    if (!settings || !settings.enabled) return;
+    if (
+      shouldSkipAutoCompaction({
+        modes,
+        messages: buildContextMessages(ctx),
+        opts,
+        contextWindow: ctx.model?.contextWindow ?? 0,
+        reserveTokens: settings.reserveTokens ?? 16384,
+        model: ctx.model as unknown as ModelLike,
+      })
+    ) {
+      ctx.ui.notify("pi-shake: skipped auto-compaction — shaken history fits", "info");
+      return { cancel: true };
+    }
   });
 
   const estimateRemovable = (ctx: ExtensionCommandContext, wanted: ShakeModes): ShakeStats => {

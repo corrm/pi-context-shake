@@ -1,7 +1,7 @@
 /**
  * Engine tests for pi-shake. Run: bun test.ts
  */
-import { shakeMessages, canDropSignedThinking, rebuildEntries } from "./index.ts";
+import { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
 import type { ShakeMessage, ShakeModes, ShakeOptions, EntryLike } from "./index.ts";
 
 const opts: ShakeOptions = { toolThreshold: 2000, blockThreshold: 12000, toolHead: 200, blockHead: 500 };
@@ -301,6 +301,61 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
 
   const off = rebuildEntries(entries, opts, { tools: false, images: false, thinking: false }, true);
   check("off modes leave entries identical", off.entries.every((e, i) => e === entries[i]));
+}
+
+// --- Scenario 12: estimateMessageTokens -----------------------------------
+{
+  const msgs: ShakeMessage[] = [
+    { role: "user", content: "x".repeat(4000) },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "t".repeat(4000) },
+        { type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } },
+      ],
+    },
+    { role: "toolResult", toolCallId: "c1", toolName: "bash", isError: false, content: [{ type: "text", text: "y".repeat(8000) }] },
+    { role: "bashExecution", command: "ls", output: "z".repeat(12000), exitCode: 0, cancelled: false, truncated: false },
+    { role: "compactionSummary", content: "s".repeat(4000) },
+  ];
+  const est = estimateMessageTokens(msgs);
+  const user = 4000 / 4;
+  const assistant = Math.ceil((4000 + ("bash".length + JSON.stringify({ command: "ls" }).length)) / 4);
+  const tool = 8000 / 4;
+  const bash = Math.ceil(("ls".length + 12000) / 4);
+  const compaction = 4000 / 4;
+  check("per-message estimator sums correctly", est === user + assistant + tool + bash + compaction, `got=${est} want=${user + assistant + tool + bash + compaction}`);
+}
+
+// --- Scenario 13: shouldSkipAutoCompaction ----------------------------------
+{
+  const window = 200_000;
+  const reserve = 10_000;
+  const all: ShakeModes = { tools: true, images: true, thinking: true };
+
+  // Big history that is shaken down well under the threshold.
+  const bigHistory: ShakeMessage[] = [
+    { role: "user", content: "look" },
+    { role: "assistant", content: [{ type: "thinking", thinking: big(50_000) }] },
+    { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }] },
+    { role: "toolResult", toolCallId: "c1", toolName: "bash", isError: false, content: [{ type: "text", text: big(80_000) }] },
+    { role: "user", content: "go" },
+    { role: "assistant", content: [{ type: "text", text: "done" }] },
+  ];
+  check("skip compaction when shaken fits", shouldSkipAutoCompaction({ modes: all, messages: bigHistory, opts, contextWindow: window, reserveTokens: reserve, model: undefined }) === true);
+
+  // Still too big: the latest user message (and its pending turn) is a giant
+  // paste — boundary-protected, so shaking cannot reduce it.
+  const stillBig: ShakeMessage[] = [
+    { role: "user", content: "hi" },
+    { role: "assistant", content: [{ type: "text", text: "ok" }] },
+    { role: "user", content: big(1_000_000) },
+    { role: "assistant", content: [{ type: "text", text: "working" }, { type: "toolCall", id: "c9", name: "bash", arguments: {} }] },
+  ];
+  check("do not skip when boundary-protected content is over threshold", shouldSkipAutoCompaction({ modes: all, messages: stillBig, opts, contextWindow: window, reserveTokens: reserve, model: undefined }) === false);
+
+  check("never skip when modes off", shouldSkipAutoCompaction({ modes: { tools: false, images: false, thinking: false }, messages: bigHistory, opts, contextWindow: window, reserveTokens: reserve, model: undefined }) === false);
+  check("never skip with no context window", shouldSkipAutoCompaction({ modes: all, messages: bigHistory, opts, contextWindow: 0, reserveTokens: reserve, model: undefined }) === false);
 }
 console.log(failures === 0 ? "\nall tests passed" : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

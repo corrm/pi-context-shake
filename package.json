@@ -1,6 +1,6 @@
 {
   "name": "pi-context-shake",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "pi extension: /shake tools|images|thinking — rebuilds session history in place to free context space",
   "type": "module",
   "license": "MIT",

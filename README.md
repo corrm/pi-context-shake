@@ -28,20 +28,31 @@ shakes the new turns too (idempotent on already-shaken content).
    dropped, tool results elided, images replaced, long text trimmed. Entry ids
    and the session tree are preserved.
 2. The file is written atomically (temp + rename) with a single `pi-shake`
-   state entry appended that records the enabled modes, then pi reopens the
-   same file — the agent's in-memory history, the transcript, and the
-   persisted session all become the shaken version.
+   state entry appended that records the enabled modes, then the running
+   session manager re-reads the file — the persisted session becomes the
+   shaken version (and so will any later `/resume`). No session switch: the
+   running process keeps its in-memory state (the `context` hook in point 3
+   keeps the live LLM payload shaken).
 3. A `context` hook (active while the session is marked shaken) also rewrites
-   the copy sent to the provider on every LLM call, as a safety net for the
-   brief window before/after the session refresh. Messages at or after the
-   latest user message are never touched by the hook, so an in-flight turn
-   keeps full context. The hook is idempotent: against already-shaken history
-   it changes nothing.
+   the copy sent to the provider on every LLM call, so the live process only
+   sends the shaken history until the session is reloaded. Messages at or
+   after the latest user message are never touched by the hook, so an
+   in-flight turn keeps full context. The hook is idempotent: against
+   already-shaken history it changes nothing.
 
 **Footer note:** pi's footer context-usage figure is anchored to the
 provider-reported usage of the *last* LLM call, so the freed space shows up
 there after the next LLM call (any prompt). The transcript and the `/shake`
 status update immediately.
+
+**Auto-compaction guard:** pi's automatic (threshold) compaction is triggered
+by that same stale anchor, so right after a shake a `continue` could re-trigger
+compaction even though the shaken history now fits. The extension listens to
+`session_before_compact` and cancels the automatic compaction when the shaken
+history is small enough to fit (estimating what the `context` hook will
+actually send, plus headroom for the system prompt + tools). This prevents the
+compaction→shake→compaction loop. Manual `/compact` and overflow recovery are
+never blocked.
 
 Elision is **irreversible for the shaken session** — the original bytes are
 gone from the file. If you might want them back, make a fork (`/tree`) before
