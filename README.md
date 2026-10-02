@@ -17,6 +17,10 @@ persisted history and the transcript are the shaken version (and any later
 | `/shake thinking` | Drop thinking/reasoning blocks from history |
 | `/shake all` | All of the above in one rebuild |
 
+A shake requested mid-turn is queued until the agent fully settles, including
+any retries or queued follow-ups. Repeated requests merge their modes into one
+rebuild. Pending shakes are cleared when the session is closed or replaced.
+
 Thresholds (chars ≈ tokens/4): tool results / bash output > **2,000** chars become
 a one-line placeholder with a 200-char head preview; text blocks > **12,000**
 chars are trimmed to a 500-char head preview. Shaking a session again later

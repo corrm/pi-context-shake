@@ -562,9 +562,11 @@ export function shouldSkipAutoCompaction(args: {
 export default function (pi: ExtensionAPI) {
   let modes: ShakeModes = { tools: false, images: false, thinking: false };
   let opts: ShakeOptions = { ...DEFAULT_OPTIONS };
+  let pendingModes: ShakeModes | undefined;
 
   // Reconstruct shaken-modes from the session (last pi-shake entry wins).
   pi.on("session_start", async (_event, ctx) => {
+    pendingModes = undefined;
     modes = { tools: false, images: false, thinking: false };
     opts = { ...DEFAULT_OPTIONS };
     for (const entry of ctx.sessionManager.getEntries()) {
@@ -578,6 +580,7 @@ export default function (pi: ExtensionAPI) {
       opts = { ...DEFAULT_OPTIONS, ...(stateData.opts ?? {}) };
     }
   });
+  pi.on("session_shutdown", () => { pendingModes = undefined; });
 
   // Keep the live in-memory message list slim until the session is re-read.
   pi.on("context", async (event, ctx) => {
@@ -638,9 +641,14 @@ export default function (pi: ExtensionAPI) {
     return rebuildEntries(entries, opts, wanted, canDropSignedThinking(model)).stats;
   };
 
-  const rebuildHistory = async (ctx: ExtensionCommandContext, wanted: ShakeModes): Promise<void> => {
+  const rebuildHistory = async (ctx: ExtensionContext, wanted: ShakeModes): Promise<void> => {
     if (!ctx.isIdle()) {
-      ctx.ui.notify("shake: wait for the agent to finish before rebuilding history", "warning");
+      pendingModes = {
+        tools: !!pendingModes?.tools || wanted.tools,
+        images: !!pendingModes?.images || wanted.images,
+        thinking: !!pendingModes?.thinking || wanted.thinking,
+      };
+      ctx.ui.notify("shake: queued until the agent finishes", "info");
       return;
     }
     const file = ctx.sessionManager.getSessionFile();
@@ -772,6 +780,15 @@ export default function (pi: ExtensionAPI) {
     modes = merged;
     ctx.ui.notify(doneText, "info");
   };
+
+  // agent_end can be followed by retries, compaction, or queued continuations.
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (!pendingModes || !ctx.isIdle()) return;
+    const wanted = pendingModes;
+    pendingModes = undefined;
+    await rebuildHistory(ctx, wanted);
+  });
+
   const showStatus = (ctx: ExtensionCommandContext): void => {
     const model = ctx.model as unknown as ModelLike;
     const stats = estimateRemovable(ctx, { tools: true, images: true, thinking: true });
