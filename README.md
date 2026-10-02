@@ -22,6 +22,17 @@ a one-line placeholder with a 200-char head preview; text blocks > **12,000**
 chars are trimmed to a 500-char head preview. Shaking a session again later
 shakes the new turns too (idempotent on already-shaken content).
 
+## Footer status
+
+The extension publishes one compact status group: `↻ ⚒ 121.4k ▣ 1 ◇ 421`.
+`⚒` is the estimated removable tool/bash/long-text tokens, `▣` the removable
+image count, and `◇` the removable thinking tokens. No Nerd Font is required.
+Each icon is separated from its count by a space. It refreshes on session load,
+completed turns, tree navigation, compaction, model changes, and shakes.
+`/shake` shows the full details as a notification, not a persistent widget.
+
+Custom footers must render `footerData.getExtensionStatuses()` to show the group.
+
 ## How it works
 
 1. The session file is read and its message entries are transformed: thinking

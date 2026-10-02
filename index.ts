@@ -577,6 +577,8 @@ export default function (pi: ExtensionAPI) {
       modes = { tools: !!stateData.modes?.tools, images: !!stateData.modes?.images, thinking: !!stateData.modes?.thinking };
       opts = { ...DEFAULT_OPTIONS, ...(stateData.opts ?? {}) };
     }
+    ctx.ui.setWidget("pi-shake", undefined);
+    updateStatus(ctx);
   });
 
   // Keep the live in-memory message list slim until the session is re-read.
@@ -632,11 +634,27 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  const estimateRemovable = (ctx: ExtensionCommandContext, wanted: ShakeModes): ShakeStats => {
+  const estimateRemovable = (ctx: ExtensionContext, wanted: ShakeModes): ShakeStats => {
     const entries = ctx.sessionManager.getEntries() as unknown as EntryLike[];
     const model = ctx.model as unknown as ModelLike;
     return rebuildEntries(entries, opts, wanted, canDropSignedThinking(model)).stats;
   };
+
+  const updateStatus = (ctx: ExtensionContext): void => {
+    if (!ctx.hasUI) return;
+    const stats = estimateRemovable(ctx, { tools: true, images: true, thinking: true });
+    const shortTokens = (chars: number): string => {
+      const tokens = estTokens(chars);
+      return tokens < 1000 ? fmt(tokens) : `${(tokens / 1000).toFixed(1)}k`;
+    };
+    const text = `↻ ⚒ ${shortTokens(stats.toolChars + stats.bashChars + stats.blockChars)} ▣ ${stats.imageCount} ◇ ${shortTokens(stats.thinkingChars)}`;
+    ctx.ui.setStatus("pi-shake", ctx.ui.theme.fg("muted", text));
+  };
+  const refreshStatus = (_event: unknown, ctx: ExtensionContext): void => updateStatus(ctx);
+  pi.on("agent_end", refreshStatus);
+  pi.on("session_tree", refreshStatus);
+  pi.on("session_compact", refreshStatus);
+  pi.on("model_select", refreshStatus);
 
   const rebuildHistory = async (ctx: ExtensionCommandContext, wanted: ShakeModes): Promise<void> => {
     if (!ctx.isIdle()) {
@@ -770,6 +788,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     modes = merged;
+    updateStatus(ctx);
     ctx.ui.notify(doneText, "info");
   };
   const showStatus = (ctx: ExtensionCommandContext): void => {
@@ -795,12 +814,7 @@ export default function (pi: ExtensionAPI) {
       lines.push("note: signed thinking kept — this Anthropic model requires thinking blocks in replayed history");
     }
     lines.push("usage: /shake tools|images|thinking|all — rebuilds the session file in place");
-    if (ctx.hasUI) {
-      ctx.ui.setWidget("pi-shake", lines);
-      ctx.ui.notify(lines[0] ?? "", "info");
-    } else {
-      ctx.ui.notify(lines.join(" | "), "info");
-    }
+    ctx.ui.notify(lines.join("\n"), "info");
   };
 
   pi.registerCommand("shake", {

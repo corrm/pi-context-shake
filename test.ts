@@ -1,7 +1,8 @@
 /**
  * Engine tests for pi-shake. Run: bun test.ts
  */
-import { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
+import extension, { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { ShakeMessage, ShakeModes, ShakeOptions, EntryLike } from "./index.ts";
 
 const opts: ShakeOptions = { toolThreshold: 2000, blockThreshold: 12000, toolHead: 200, blockHead: 500 };
@@ -356,6 +357,68 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
 
   check("never skip when modes off", shouldSkipAutoCompaction({ modes: { tools: false, images: false, thinking: false }, messages: bigHistory, opts, contextWindow: window, reserveTokens: reserve, model: undefined }) === false);
   check("never skip with no context window", shouldSkipAutoCompaction({ modes: all, messages: bigHistory, opts, contextWindow: 0, reserveTokens: reserve, model: undefined }) === false);
+}
+
+// --- Scenario 14: compact footer status ------------------------------------
+{
+  let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
+  const handlers = new Map<string, (event: never, ctx: ExtensionCommandContext) => unknown>();
+  extension({
+    on(name: string, handler: (event: never, ctx: ExtensionCommandContext) => unknown) {
+      handlers.set(name, handler);
+    },
+    registerCommand(name: string, registered: NonNullable<typeof command>) {
+      check("shake command registered", name === "shake");
+      command = registered;
+    },
+  } as unknown as ExtensionAPI);
+  const notifications: string[] = [];
+  const ctx = {
+    isIdle: () => false,
+    getContextUsage: () => undefined,
+    sessionManager: { getEntries: () => [] },
+    hasUI: false,
+    ui: { notify: (text: string) => notifications.push(text) },
+  } as unknown as ExtensionCommandContext;
+
+  // Footer updates use the same estimate as /shake, without leaving a widget.
+  let status: string | undefined;
+  let widget: string[] | undefined = ["old widget"];
+  let entries: EntryLike[] = [
+    { type: "message", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: big(40_000) }] } },
+    { type: "message", message: { role: "user", content: big(20_000) } },
+    { type: "message", message: { role: "user", content: [{ type: "image", data: b64(1000), mimeType: "image/png" }] } },
+    { type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: big(4000), thinkingSignature: "sig" }] } },
+  ];
+  const uiCtx = {
+    ...ctx,
+    hasUI: true,
+    sessionManager: { getEntries: () => entries },
+    ui: {
+      notify: (text: string) => notifications.push(text),
+      theme: { fg: (_color: string, text: string) => text },
+      setStatus: (key: string, text: string | undefined) => { if (key === "pi-shake") status = text; },
+      setWidget: (_key: string, content: string[] | undefined) => { widget = content; },
+    },
+  } as unknown as ExtensionCommandContext;
+  await handlers.get("session_start")!({} as never, uiCtx);
+  check("old widget cleared on load", widget === undefined);
+  check("footer contains compact removable counts with icon spacing", status === "↻ ⚒ 14.8k ▣ 1 ◇ 1.0k", status);
+  notifications.length = 0;
+  await command!.handler("", uiCtx);
+  check("status details are a notification, not a widget", notifications[0]?.includes("removable now:") === true && widget === undefined);
+  uiCtx.model = { api: "anthropic-messages" } as typeof uiCtx.model;
+  await handlers.get("model_select")!({} as never, uiCtx);
+  check("footer respects signed-thinking safety", status?.endsWith("◇ 0") === true);
+  entries = [];
+  for (const event of ["agent_end", "session_tree", "session_compact", "session_start"]) {
+    status = "stale";
+    await handlers.get(event)!({} as never, uiCtx);
+    check(`${event} refreshes footer`, status === "↻ ⚒ 0 ▣ 0 ◇ 0");
+  }
+  status = undefined;
+  await handlers.get("agent_end")!({} as never, ctx);
+  check("no footer update without UI", status === undefined);
 }
 console.log(failures === 0 ? "\nall tests passed" : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
