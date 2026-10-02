@@ -2,7 +2,8 @@
  * pi-shake — shake heavy content out of the session history to free space.
  *
  * Commands:
- *   /shake              status: shaken modes, context usage, what can be removed
+ *   /shake              rebuild with every mode at once (same as /shake all)
+ *   /shake status       status: shaken modes, context usage, what can be removed
  *   /shake tools        rebuild history in place: elide big tool results,
  *                       bash output, and long text blocks
  *   /shake images       rebuild history in place: replace image blocks with
@@ -124,7 +125,7 @@ const DEFAULT_OPTIONS: ShakeOptions = {
   toolHead: 200,
   blockHead: 500,
 };
-const KINDS = ["tools", "images", "thinking", "all"] as const;
+const KINDS = ["tools", "images", "thinking", "all", "status"] as const;
 type ModelLike = { api?: string; compat?: { supportsMidConvoEffort?: boolean } } | undefined;
 
 const estTokens = (chars: number): number => Math.max(0, Math.round(chars / 4));
@@ -794,7 +795,7 @@ export default function (pi: ExtensionAPI) {
     if (model?.api === "anthropic-messages" && !canDropSignedThinking(model)) {
       lines.push("note: signed thinking kept — this Anthropic model requires thinking blocks in replayed history");
     }
-    lines.push("usage: /shake tools|images|thinking|all — rebuilds the session file in place");
+    lines.push("usage: /shake [tools|images|thinking|all] — defaults to all; /shake status shows status");
     if (ctx.hasUI) {
       ctx.ui.setWidget("pi-shake", lines);
       ctx.ui.notify(lines[0] ?? "", "info");
@@ -811,8 +812,8 @@ export default function (pi: ExtensionAPI) {
       return filtered.length > 0 ? filtered : null;
     },
     handler: async (args, ctx) => {
-      const kind = (args ?? "").trim().toLowerCase();
-      if (kind === "") {
+      const kind = (args ?? "").trim().toLowerCase() || "all";
+      if (kind === "status") {
         showStatus(ctx);
         return;
       }
@@ -825,7 +826,7 @@ export default function (pi: ExtensionAPI) {
         await rebuildHistory(ctx, wanted);
         return;
       }
-      ctx.ui.notify(`unknown shake mode "${kind}" — try: tools, images, thinking, all`, "error");
+      ctx.ui.notify(`unknown shake mode "${kind}" — try: tools, images, thinking, all, status`, "error");
     },
   });
 }

@@ -1,7 +1,8 @@
 /**
  * Engine tests for pi-shake. Run: bun test.ts
  */
-import { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
+import extension, { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { ShakeMessage, ShakeModes, ShakeOptions, EntryLike } from "./index.ts";
 
 const opts: ShakeOptions = { toolThreshold: 2000, blockThreshold: 12000, toolHead: 200, blockHead: 500 };
@@ -356,6 +357,38 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
 
   check("never skip when modes off", shouldSkipAutoCompaction({ modes: { tools: false, images: false, thinking: false }, messages: bigHistory, opts, contextWindow: window, reserveTokens: reserve, model: undefined }) === false);
   check("never skip with no context window", shouldSkipAutoCompaction({ modes: all, messages: bigHistory, opts, contextWindow: 0, reserveTokens: reserve, model: undefined }) === false);
+}
+// --- Scenario 14: command routing ------------------------------------------
+{
+  let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
+  extension({
+    on() {},
+    registerCommand(name: string, registered: NonNullable<typeof command>) {
+      check("shake command registered", name === "shake");
+      command = registered;
+    },
+  } as unknown as ExtensionAPI);
+  const notifications: string[] = [];
+  const ctx = {
+    isIdle: () => false,
+    getContextUsage: () => undefined,
+    sessionManager: { getEntries: () => [] },
+    hasUI: false,
+    ui: { notify: (text: string) => notifications.push(text) },
+  } as unknown as ExtensionCommandContext;
+  for (const args of ["", "  ", "all", "tools", "images", "thinking"]) {
+    notifications.length = 0;
+    await command!.handler(args, ctx);
+    check(`/${args ? `shake ${args}` : "shake"} routes to rebuild`, notifications[0]?.includes("wait for the agent") === true);
+  }
+  notifications.length = 0;
+  await command!.handler(" STATUS ", ctx);
+  check("status shows details without rebuilding", notifications[0]?.includes("removable now:") === true);
+  check("status documents default all", notifications[0]?.includes("defaults to all") === true);
+  check("status is autocompleted", (await command!.getArgumentCompletions?.("st"))?.[0]?.value === "status");
+  notifications.length = 0;
+  await command!.handler("invalid", ctx);
+  check("unknown mode suggests status", notifications[0]?.includes("all, status") === true);
 }
 console.log(failures === 0 ? "\nall tests passed" : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

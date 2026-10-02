@@ -11,7 +11,8 @@ persisted history and the transcript are the shaken version (and any later
 
 | Command | Effect |
 |---|---|
-| `/shake` | Status: shaken modes, context usage, what can be removed |
+| `/shake` | All modes in one rebuild (same as `/shake all`) |
+| `/shake status` | Status: shaken modes, context usage, what can be removed |
 | `/shake tools` | Elide big tool results / bash output / long text blocks in history |
 | `/shake images` | Replace image blocks in history with one-line placeholders |
 | `/shake thinking` | Drop thinking/reasoning blocks from history |
@@ -61,7 +62,7 @@ shaking; forks made before the shake keep the full history.
 **Thinking safety:** Anthropic requires signed thinking blocks in replayed
 history. Signed/redacted thinking is only dropped when the active model is not
 `anthropic-messages`, or when pi sends the `thinking-binding-controls` beta
-(model with `supportsMidConvoEffort`). Otherwise it is kept and `/shake` status
+(model with `supportsMidConvoEffort`). Otherwise it is kept and `/shake status` output
 notes it.
 
 ## Install
