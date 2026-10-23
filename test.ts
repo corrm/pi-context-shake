@@ -1,7 +1,10 @@
 /**
  * Engine tests for pi-shake. Run: bun test.ts
  */
-import { shakeMessages, canDropSignedThinking, rebuildEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import shakeExtension, { shakeMessages, canDropSignedThinking, rebuildEntries, spliceOutStateEntries, estimateMessageTokens, shouldSkipAutoCompaction } from "./index.ts";
 import type { ShakeMessage, ShakeModes, ShakeOptions, EntryLike } from "./index.ts";
 
 const opts: ShakeOptions = { toolThreshold: 2000, blockThreshold: 12000, toolHead: 200, blockHead: 500 };
@@ -356,6 +359,158 @@ const b64 = (n: number): string => Buffer.from(big(n)).toString("base64");
 
   check("never skip when modes off", shouldSkipAutoCompaction({ modes: { tools: false, images: false, thinking: false }, messages: bigHistory, opts, contextWindow: window, reserveTokens: reserve, model: undefined }) === false);
   check("never skip with no context window", shouldSkipAutoCompaction({ modes: all, messages: bigHistory, opts, contextWindow: 0, reserveTokens: reserve, model: undefined }) === false);
+}
+
+// --- Scenario 14: spliceOutStateEntries + repeated /shake across turns -------
+{
+  const header: EntryLike = { type: "session", version: 3, id: "sess", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" };
+  const sys: EntryLike = { type: "message", id: "sys", parentId: null, message: { role: "system", content: "root system" } };
+  const e1: EntryLike = { type: "message", id: "e1", parentId: "sys", message: { role: "assistant", content: [{ type: "text", text: "a1" }] } };
+  const s1: EntryLike = { type: "custom", customType: "pi-shake", id: "s1", parentId: "e1", data: {} };
+  const s2: EntryLike = { type: "custom", customType: "pi-shake", id: "s2", parentId: "s1", data: {} };
+  const e2: EntryLike = { type: "message", id: "e2", parentId: "s2", message: { role: "user", content: "u2" } };
+  const c1: EntryLike = { type: "compaction", id: "c1", parentId: "e2", firstKeptEntryId: "s1", summary: "sum", tokensBefore: 1000 };
+  const b1: EntryLike = { type: "branch_summary", id: "b1", parentId: "c1", fromId: "s2", summary: "branched" };
+  const e3: EntryLike = { type: "message", id: "e3", parentId: "b1", message: { role: "assistant", content: [{ type: "text", text: "a2" }] } };
+
+  const spliced = spliceOutStateEntries([header, sys, e1, s1, s2, e2, c1, b1, e3], "e3");
+  check("state entries removed from spliced output", !spliced.entries.some((e) => e.type === "custom" && e.customType === "pi-shake"));
+  check("e2.parentId spliced transitively across s2->s1 to e1", spliced.byId.get("e2")?.parentId === "e1");
+  check("compaction.firstKeptEntryId advanced from s1 to first kept real entry e2", spliced.byId.get("c1")?.firstKeptEntryId === "e2");
+  check("branch_summary.fromId spliced from s2 to e1", spliced.byId.get("b1")?.fromId === "e1");
+  check("realLeaf resolved to active leaf e3", spliced.realLeaf?.id === "e3");
+
+  // Back-to-back shake where currentLeafId is a removed state entry (s2 -> e1)
+  const backToBack = spliceOutStateEntries([header, sys, e1, s1, s2], "s2");
+  check("currentLeafId on removed state entry resolves realLeaf to e1", backToBack.realLeaf?.id === "e1");
+
+  // Edge cases: root-parented state entry, cycle guard, compaction fallback, label targetId
+  const rootState: EntryLike = { type: "custom", customType: "pi-shake", id: "sr", parentId: null };
+  const childOfRootState: EntryLike = { type: "message", id: "m1", parentId: "sr", message: { role: "user", content: "hi" } };
+  const labelOnRootState: EntryLike = { type: "label", id: "lr", parentId: "m1", targetId: "sr", label: "orphan" };
+  const afterRootLabel: EntryLike = { type: "message", id: "m2", parentId: "lr", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } };
+  const rootSpliced = spliceOutStateEntries([header, rootState, childOfRootState, labelOnRootState, afterRootLabel], "lr");
+  check("child of root-parented state entry becomes root (parentId null)", rootSpliced.byId.get("m1")?.parentId === null);
+  check("label targeting root-parented state entry is dropped and its child m2 reparents to m1", !rootSpliced.byId.has("lr") && rootSpliced.byId.get("m2")?.parentId === "m1");
+  check("currentLeafId on dropped root-state label resolves realLeaf to m1", rootSpliced.realLeaf?.id === "m1");
+
+  const cyc1: EntryLike = { type: "custom", customType: "pi-shake", id: "cyc1", parentId: "cyc2" };
+  const cyc2: EntryLike = { type: "custom", customType: "pi-shake", id: "cyc2", parentId: "cyc1" };
+  const cycChild: EntryLike = { type: "message", id: "mc", parentId: "cyc1", message: { role: "user", content: "hi" } };
+  const cycSpliced = spliceOutStateEntries([header, cyc1, cyc2, cycChild], "mc");
+  check("cycle in corrupt state entries terminates with null parentId", cycSpliced.byId.get("mc")?.parentId === null);
+
+  const cFallback: EntryLike = { type: "compaction", id: "cf", parentId: "s1", firstKeptEntryId: "s1", summary: "s", tokensBefore: 100 };
+  const lbl: EntryLike = { type: "label", id: "l1", parentId: "cf", targetId: "s1", label: "mark" };
+  const fbSpliced = spliceOutStateEntries([header, sys, e1, s1, cFallback, lbl], "l1");
+  check("compaction with no non-state entry after state target falls back to compaction id", fbSpliced.byId.get("cf")?.firstKeptEntryId === "cf");
+  check("label targeting removed state entry reparents targetId to e1", fbSpliced.byId.get("l1")?.targetId === "e1");
+
+  // Full walk from realLeaf back to root reaches sys without gaps
+  const walked: string[] = [];
+  let cur: EntryLike | undefined = spliced.realLeaf;
+  while (cur) {
+    walked.push(cur.id as string);
+    cur = typeof cur.parentId === "string" ? spliced.byId.get(cur.parentId) : undefined;
+  }
+  walked.reverse();
+  check("backward parentId walk from leaf reaches root sys", walked.join(",") === "sys,e1,e2,c1,b1,e3", `got=${walked.join(",")}`);
+
+  // End-to-end command handler test across two /shake runs with a turn in between
+  const dir = mkdtempSync(join(tmpdir(), "pi-shake-reshake-"));
+  try {
+    const file = join(dir, "session.jsonl");
+    const writeEntries = (list: EntryLike[]) => writeFileSync(file, list.map((e) => `${JSON.stringify(e)}\n`).join(""));
+    const readEntries = (): EntryLike[] =>
+      readFileSync(file, "utf8").trim().split("\n").map((l: string) => JSON.parse(l) as EntryLike);
+    const getBranchIds = (list: EntryLike[]): string[] => {
+      const nonHeader = list.filter((e) => e.type !== "session");
+      const map = new Map<string, EntryLike>();
+      for (const e of nonHeader) if (typeof e.id === "string") map.set(e.id, e);
+      let node = nonHeader[nonHeader.length - 1];
+      const path: string[] = [];
+      while (node && typeof node.id === "string") {
+        path.push(node.id);
+        node = typeof node.parentId === "string" ? map.get(node.parentId) : undefined;
+      }
+      return path.reverse();
+    };
+
+    writeEntries([
+      header,
+      sys,
+      { type: "message", id: "u1", parentId: "sys", message: { role: "user", content: "turn 1" } },
+      { type: "message", id: "t1", parentId: "u1", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: big(10_000) }] } },
+      { type: "message", id: "a1", parentId: "t1", message: { role: "assistant", content: [{ type: "text", text: "ans 1" }], usage: { totalTokens: 4000 } } },
+    ]);
+
+    let cmdHandler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+    shakeExtension({
+      on() {},
+      registerCommand(name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+        if (name === "shake") cmdHandler = def.handler;
+      },
+    } as unknown as Parameters<typeof shakeExtension>[0]);
+
+    const makeCtx = () => {
+      const current = readEntries();
+      const nonHeader = current.filter((e) => e.type !== "session");
+      const leaf = nonHeader[nonHeader.length - 1];
+      return {
+        hasUI: false,
+        model: { api: "openai-completions" },
+        isIdle: () => true,
+        getContextUsage: () => ({ tokens: 4000, contextWindow: 200000, percent: 2 }),
+        sessionManager: {
+          getSessionFile: () => file,
+          getLeafId: () => (leaf?.id as string) ?? null,
+          getEntries: () => nonHeader,
+          setSessionFile: () => {},
+        },
+        ui: { notify() {}, setWidget() {} },
+      };
+    };
+
+    await cmdHandler!("tools", makeCtx());
+    const afterFirst = readEntries();
+    const firstShakeEntry = afterFirst[afterFirst.length - 1]!;
+    check("first /shake appends pi-shake state entry at leaf", firstShakeEntry.type === "custom" && firstShakeEntry.customType === "pi-shake");
+
+    // Simulate normal turn 2 chained onto firstShakeEntry.id
+    writeEntries([
+      ...afterFirst,
+      { type: "message", id: "u2", parentId: firstShakeEntry.id, message: { role: "user", content: "turn 2" } },
+      { type: "message", id: "t2", parentId: "u2", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: big(10_000) }] } },
+      { type: "message", id: "a2", parentId: "t2", message: { role: "assistant", content: [{ type: "thinking", thinking: big(4_000) }, { type: "text", text: "ans 2" }], usage: { totalTokens: 5000 } } },
+    ]);
+
+    await cmdHandler!("tools", makeCtx());
+    const afterSecond = readEntries();
+    const secondShakeEntry = afterSecond[afterSecond.length - 1]!;
+    const branchAfterSecond = getBranchIds(afterSecond);
+    const a2AfterSecond = afterSecond.find((e) => e.id === "a2") as { message?: { usage?: { totalTokens?: number } } } | undefined;
+    check(
+      "second /shake preserves exact ordered branch back to root sys and updates assistant usage anchor",
+      branchAfterSecond.join(",") === `sys,u1,t1,a1,u2,t2,a2,${secondShakeEntry.id as string}` &&
+        typeof a2AfterSecond?.message?.usage?.totalTokens === "number" &&
+        a2AfterSecond.message.usage.totalTokens < 4000,
+      `branch=${branchAfterSecond.join(",")} anchor=${a2AfterSecond?.message?.usage?.totalTokens}`,
+    );
+
+    // Back-to-back third /shake (thinking) with no turn in between
+    await cmdHandler!("thinking", makeCtx());
+    const afterThird = readEntries();
+    const thirdShakeEntry = afterThird[afterThird.length - 1]!;
+    const branchAfterThird = getBranchIds(afterThird);
+    check(
+      "back-to-back third /shake chains new state entry directly to a2 without losing branch",
+      thirdShakeEntry.parentId === "a2" &&
+        branchAfterThird.join(",") === `sys,u1,t1,a1,u2,t2,a2,${thirdShakeEntry.id as string}`,
+      `branch=${branchAfterThird.join(",")}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 console.log(failures === 0 ? "\nall tests passed" : `\n${failures} test(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
